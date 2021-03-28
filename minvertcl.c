@@ -17,11 +17,11 @@
 #define KERNEL_MAX_REDUC_BEGIN 1
 #define KERNEL_MAX_REDUC       2
 #define KERNEL_STORE_COLUMN    3
-#define KERNEL_NORMALISE_LINE  4
-#define KERNEL_REDUCE_MATRIX   5
+#define KERNEL_NORMALISE_PIVOT 4
+#define KERNEL_REDUCE          5
 #define KERNEL_REARRANGE       6
 
-#define KERNEL_COUNT 6
+#define KERNEL_COUNT 7
 
 static int64_t time_point(struct timespec *ts) {
 	return ts->tv_sec * SECOND_DURATION_NS + ts->tv_nsec;
@@ -44,8 +44,8 @@ static void invert_matrix(
 	kernel_names[KERNEL_MAX_REDUC_BEGIN] = "max_reduc_begin";
 	kernel_names[KERNEL_MAX_REDUC      ] = "max_reduc";
 	kernel_names[KERNEL_STORE_COLUMN   ] = "store_column";
-	kernel_names[KERNEL_NORMALISE_LINE ] = "normalise_line";
-	kernel_names[KERNEL_REDUCE_MATRIX  ] = "reduce";
+	kernel_names[KERNEL_NORMALISE_PIVOT] = "normalise_pivot";
+	kernel_names[KERNEL_REDUCE         ] = "reduce";
 	kernel_names[KERNEL_REARRANGE      ] = "rearrange";
 
 	struct cooker_dish prg;	
@@ -54,6 +54,15 @@ static void invert_matrix(
 		) != CS_OK
 	)
 		exit(EXIT_FAILURE);
+
+	// Set kernel constants for enhanced code readability
+	cl_kernel const k_build_identity = prg.kernels[KERNEL_BUILD_IDENTITY];
+	cl_kernel const k_max_reduc_begin = prg.kernels[KERNEL_MAX_REDUC_BEGIN];
+	cl_kernel const k_max_reduc      = prg.kernels[KERNEL_MAX_REDUC];
+	cl_kernel const k_store_column   = prg.kernels[KERNEL_STORE_COLUMN];
+	cl_kernel const k_normalise_pivot = prg.kernels[KERNEL_NORMALISE_PIVOT];
+	cl_kernel const k_reduce         = prg.kernels[KERNEL_REDUCE];
+	cl_kernel const k_rearrange      = prg.kernels[KERNEL_REARRANGE];
 	
 	// Begin time counting if needed
 	int64_t tp_start;
@@ -68,7 +77,7 @@ static void invert_matrix(
 
 	cl_int status; // For error management
 	cl_mem matrix; // Initially m on the left and initialised I n x n on the right
-	cl_mem indices; // Used for maximum reduction and for rearrangement
+	cl_mem indices; // Used for maximum reduction, reduction and rearrangement
 	size_t const size = n * n * sizeof(double);
 
 	// Create buffer objects for input & output matrix and reordering data.
@@ -83,7 +92,7 @@ static void invert_matrix(
 	}
 
 	indices = clCreateBuffer(
-		plate.context, mem_flags, 2 * n * sizeof(size_t), NULL, &status
+		plate.context, mem_flags, 2 * n * sizeof(cl_ulong), NULL, &status
 	);
 	if (!indices || status != CL_SUCCESS) {
 		puts("Could not create buffer.");
@@ -92,38 +101,162 @@ static void invert_matrix(
 
 	// Define procedures to run on the GPU
 	size_t const linear_single_size = (n + REDUCTION_WIDTH - 1) / REDUCTION_WIDTH;
-	size_t const linean_double_size = 2 * n
+	size_t const linear_double_size = 2 * n;
+	size_t global_2d_sizes[2];
+	global_2d_sizes[0] = n;
+	global_2d_sizes[1] = linear_double_size;
+
+	// Need to turn size_t to unsigned long for ensured kernel compatibility.
+	cl_ulong const kp_n = n;
+	cl_ulong const kp_width = REDUCTION_WIDTH;
+
+	// Initialise a bunch of parameters for all kernels, those that will not
+	// change accross executions.
+	status = (
+		  clSetKernelArg(k_build_identity, 0, sizeof(cl_mem), &matrix)
+		| clSetKernelArg(k_build_identity, 1, sizeof(cl_ulong), &kp_n)
+		| clSetKernelArg(k_build_identity, 2, sizeof(cl_ulong), &kp_width)
+
+		| clSetKernelArg(k_max_reduc_begin, 1, sizeof(cl_mem), &matrix)
+		| clSetKernelArg(k_max_reduc_begin, 2, sizeof(cl_mem), &indices)
+		| clSetKernelArg(k_max_reduc_begin, 3, sizeof(cl_ulong), &kp_n)
+		| clSetKernelArg(k_max_reduc_begin, 4, sizeof(cl_ulong), &kp_width)
+
+		| clSetKernelArg(k_max_reduc, 2, sizeof(cl_mem), &matrix)
+		| clSetKernelArg(k_max_reduc, 3, sizeof(cl_mem), &indices)
+		| clSetKernelArg(k_max_reduc, 4, sizeof(cl_ulong), &kp_n)
+		| clSetKernelArg(k_max_reduc, 5, sizeof(cl_ulong), &kp_width)
+
+		| clSetKernelArg(k_store_column, 1, sizeof(cl_mem), &matrix)
+		| clSetKernelArg(k_store_column, 2, sizeof(cl_mem), &indices)
+		| clSetKernelArg(k_store_column, 3, sizeof(cl_ulong), &kp_n)
+		| clSetKernelArg(k_store_column, 4, sizeof(cl_ulong), &kp_width)
+
+		| clSetKernelArg(k_normalise_pivot, 1, sizeof(cl_mem), &matrix)
+		| clSetKernelArg(k_normalise_pivot, 2, sizeof(cl_mem), &indices)
+		| clSetKernelArg(k_normalise_pivot, 3, sizeof(cl_ulong), &kp_n)
+		| clSetKernelArg(k_normalise_pivot, 4, sizeof(cl_ulong), &kp_width)
+
+		| clSetKernelArg(k_reduce, 1, sizeof(cl_mem), &matrix)
+		| clSetKernelArg(k_reduce, 2, sizeof(cl_mem), &indices)
+		| clSetKernelArg(k_reduce, 3, sizeof(cl_ulong), &kp_n)
+		| clSetKernelArg(k_reduce, 4, sizeof(cl_ulong), &kp_width)
+
+		| clSetKernelArg(k_rearrange, 0, sizeof(cl_mem), &matrix)
+		| clSetKernelArg(k_rearrange, 1, sizeof(cl_mem), &indices)
+		| clSetKernelArg(k_rearrange, 2, sizeof(cl_ulong), &kp_n)
+		| clSetKernelArg(k_rearrange, 3, sizeof(cl_ulong), &kp_width)
+	);
+	if (status != CL_SUCCESS) {
+		puts("Could not define kernel arguments.");
+		exit(EXIT_FAILURE);
+	}
 
 	double const zero = 0.;
-	clEnqueueFillBuffer(
+	status = clEnqueueFillBuffer(
 		plate.queue, matrix, &zero, sizeof(zero), size, size, 0, NULL, NULL
 	);
-	
-	
-/*	
-	// Associate the input and output buffers with the kernel 
-	status  = clSetKernelArg(kernel, 0, sizeof(cl_mem), &d_A);
-	status |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &d_B);
-	status |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &d_C);
 	if (status != CL_SUCCESS) {
-		printf("clSetKernelArg failed\n");
+		puts("Could not enqueue buffer initialisation.");
 		exit(EXIT_FAILURE);
 	}
-	
-	// Define an index space (global work size) of threads for execution.  
-	// A workgroup size (local work size) is not required, but can be used.
-	size_t work_sizes[1];  // There are ELEMENTS threads
-	work_sizes[0] = ELEMENTS;
-	
-	// Execute the kernel.
-	if (clEnqueueNDRangeKernel(
-			cmdQueue, kernel, 1, NULL, work_sizes, NULL, 0, NULL, NULL
-		) != CL_SUCCESS
-	) {
-		printf("clEnqueueNDRangeKernel failed\n");
+	status = clEnqueueNDRangeKernel(
+		plate.queue, k_build_identity,
+		1, NULL, &linear_single_size, NULL,
+		0, NULL, NULL
+	);
+	if (status != CL_SUCCESS) {
+		puts("Could not enqueue <build_identity> kernel execution.");
 		exit(EXIT_FAILURE);
 	}
-*/	
+
+	// Iterate through all lines for our custom Gauss-Jordan reduction
+	for (cl_ulong k = 0; k < kp_n; ++k) {
+		// Set k for all kernels
+		status = (
+			  clSetKernelArg(k_max_reduc_begin, 0, sizeof(cl_ulong), &k)
+			| clSetKernelArg(k_max_reduc, 0, sizeof(cl_ulong), &k)
+			| clSetKernelArg(k_store_column, 0, sizeof(cl_ulong), &k)
+			| clSetKernelArg(k_normalise_pivot, 0, sizeof(cl_ulong), &k)
+			| clSetKernelArg(k_reduce, 0, sizeof(cl_ulong), &k)
+		);
+		if (status != CL_SUCCESS) {
+			puts("Could not define kernel arguments.");
+			exit(EXIT_FAILURE);
+		}
+
+		// Find maximum of line 
+		status = clEnqueueNDRangeKernel(
+			plate.queue, k_max_reduc_begin,
+			1, NULL, &linear_single_size, NULL,
+			0, NULL, NULL
+		);
+		if (status != CL_SUCCESS) {
+			puts("Could not enqueue <max_reduc_begin> kernel execution.");
+			exit(EXIT_FAILURE);
+		}
+
+		cl_ulong depth = 0;
+		size_t count = n;
+		do {
+			count = (count + REDUCTION_WIDTH - 1) / REDUCTION_WIDTH;
+			status = clSetKernelArg(k_max_reduc, 1, sizeof(cl_ulong), &depth);
+			if (status != CL_SUCCESS) {
+				puts("Could not define kernel argument.");
+				exit(EXIT_FAILURE);
+			}
+			++depth;
+			status = clEnqueueNDRangeKernel(
+				plate.queue, k_max_reduc, 1, NULL, &count, NULL, 0, NULL, NULL
+			);
+			if (status != CL_SUCCESS) {
+				puts("Could not enqueue <max_reduc> kernel execution.");
+				exit(EXIT_FAILURE);
+			}
+			
+			++depth;
+		} while (count > 1);
+
+		status = clEnqueueNDRangeKernel(
+			plate.queue, k_store_column,
+			1, NULL, &linear_single_size, NULL,
+			0, NULL, NULL
+		);
+		if (status != CL_SUCCESS) {
+			puts("Could not enqueue <store_column> kernel execution.");
+			exit(EXIT_FAILURE);
+		}
+
+		status = clEnqueueNDRangeKernel(
+			plate.queue, k_normalise_pivot,
+			1, NULL, &linear_double_size, NULL,
+			0, NULL, NULL
+		);
+		if (status != CL_SUCCESS) {
+			puts("Could not enqueue <normalise_pivot> kernel execution.");
+			exit(EXIT_FAILURE);
+		}
+
+		status = clEnqueueNDRangeKernel(
+			plate.queue, k_reduce,
+			2, NULL, global_2d_sizes, NULL,
+			0, NULL, NULL
+		);
+		if (status != CL_SUCCESS) {
+			puts("Could not enqueue <reduce> kernel execution.");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	global_2d_sizes[1] = linear_single_size;
+	status = clEnqueueNDRangeKernel(
+		plate.queue, k_rearrange, 2, NULL, global_2d_sizes, NULL, 0, NULL, NULL
+	);
+	if (status != CL_SUCCESS) {
+		puts("Could not enqueue kernel execution.");
+		exit(EXIT_FAILURE);
+	}
+
 	// Fetch the resulting matrix back to host memory (in output buffer).
 	clEnqueueReadBuffer(plate.queue, matrix, CL_TRUE, 0, size, out, 0, NULL, NULL);
 	

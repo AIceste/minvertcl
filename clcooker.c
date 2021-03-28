@@ -120,7 +120,7 @@ enum cooker_state cooker_plate_init(
 
 	// Create a command queue for using the device
 	cl_command_queue const queue = clCreateCommandQueueWithProperties(
-		context, device, 0, &status
+		context, device, NULL, &status
 	);
 	if (status != CL_SUCCESS || !queue)
 		goto failure_createcommandqueue;
