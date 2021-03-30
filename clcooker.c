@@ -128,6 +128,7 @@ enum cooker_state cooker_plate_init(
 	// Assign output fields
 	plate->context = context;
 	plate->device = device;
+	plate->queue = queue;
 
 	return ret;
 
