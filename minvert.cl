@@ -43,12 +43,6 @@ __kernel void max_reduc_begin(
 			val = tmp;
 		}
 	}
-	// For debug purpose, puts all value visibly at the end of the buffer.
-	indices[k + id + get_global_size(0)] = pos
-		+ 1000000                        * id * REDUCTION_WIDTH
-		+ 1000                           * end
-		+ 1000000000 * get_global_size(0)
-	;
 	indices[k + id] = max;
 }
 __kernel void max_reduc(
@@ -64,17 +58,25 @@ __kernel void max_reduc(
 
 	// So long that we stay within buffer range nothing can 
 	// go haray after running max_reduc_begin.
-	cl_ulong const end = min(2 * n, left + kernel_width);
+	cl_ulong const end = min(
+		k + (n + REDUCTION_WIDTH - 1)/ REDUCTION_WIDTH, left + kernel_width
+	);
 	cl_ulong pos = left;
 	cl_ulong max = indices[pos];
 	double val = fabs(row[max]);
 	while ((pos += step) < end) {
 		double const tmp = fabs(row[indices[pos]]);
 		if (tmp > val) {
-			max = pos;
+			max = indices[pos];
 			val = tmp;
 		}
 	}
+	// For debug purpose, puts all value visibly at the end of the buffer.
+	indices[left + 1] = 
+		  1000000000 * get_global_size(0)
+		+ 1000000    * left
+		+ 1000       * pos
+		+ (cl_ulong)(row[indices[left]] * 10);
 	indices[left] = max;
 }
 
@@ -82,11 +84,11 @@ __kernel void max_reduc(
 // needed untouched for parallel line reduction
 __kernel void store_column(
 	cl_ulong const k,
-	__global double *const m, __global cl_ulong *const indices,
+	__global double const *const m, __global cl_ulong *const indices,
 	cl_ulong const n
 ) {
 	cl_ulong const id = get_global_id(0);
-	cl_ulong const col = indices[k] % n;
+	cl_ulong const col = indices[k];
 	cl_ulong const beg = id * REDUCTION_WIDTH;
 	cl_ulong const end = min(n, beg + REDUCTION_WIDTH);
 
@@ -140,7 +142,7 @@ __kernel void rearrange(
 	cl_ulong j = get_global_id(1) * REDUCTION_WIDTH;
 	cl_ulong const end = min(n, j + REDUCTION_WIDTH);
 	__global double const *const src = m + size + i * n;
-	__global double *const dst = m + (indices[i] % n) * n;
+	__global double *const dst = m + indices[i] * n;
 
 	do {
 		dst[j] = src[j];

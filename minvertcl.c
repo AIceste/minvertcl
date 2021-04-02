@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <time.h> // For time measurement
 #include <math.h> // For error measurement
+                  // And event counting
 
 // Project includes
 #include "clcooker.h"
@@ -12,15 +13,7 @@
 #define SECOND_DURATION_NS 1000000000ll
 
 #define VERBOSITY CV_ALL
-#define PRINT_PROCESS_INFO 1
-
-#define KERNEL_BUILD_IDENTITY  0
-#define KERNEL_MAX_REDUC_BEGIN 1
-#define KERNEL_MAX_REDUC       2
-#define KERNEL_STORE_COLUMN    3
-#define KERNEL_NORMALISE_PIVOT 4
-#define KERNEL_REDUCE          5
-#define KERNEL_REARRANGE       6
+#define PRINT_PROCESS_INFO 0
 #define KERNEL_COUNT 7
 
 #if PRINT_PROCESS_INFO
@@ -93,13 +86,13 @@ static void invert_matrix(
 
 	// Initialise program from file
 	char const *kernel_names[KERNEL_COUNT];
-	kernel_names[KERNEL_BUILD_IDENTITY ] = "build_identity";
-	kernel_names[KERNEL_MAX_REDUC_BEGIN] = "max_reduc_begin";
-	kernel_names[KERNEL_MAX_REDUC      ] = "max_reduc";
-	kernel_names[KERNEL_STORE_COLUMN   ] = "store_column";
-	kernel_names[KERNEL_NORMALISE_PIVOT] = "normalise_pivot";
-	kernel_names[KERNEL_REDUCE         ] = "reduce";
-	kernel_names[KERNEL_REARRANGE      ] = "rearrange";
+	kernel_names[0] = "build_identity";
+	kernel_names[1] = "max_reduc_begin";
+	kernel_names[2] = "max_reduc";
+	kernel_names[3] = "store_column";
+	kernel_names[4] = "normalise_pivot";
+	kernel_names[5] = "reduce";
+	kernel_names[6] = "rearrange";
 
 	struct cooker_dish prg;	
 	if (cooker_dish_init(
@@ -108,6 +101,15 @@ static void invert_matrix(
 	)
 		exit(EXIT_FAILURE);
 
+	// Set kernel constants for enhanced code readability
+	cl_kernel const k_build_identity  = prg.kernels[0];
+	cl_kernel const k_max_reduc_begin = prg.kernels[1];
+	cl_kernel const k_max_reduc       = prg.kernels[2];
+	cl_kernel const k_store_column    = prg.kernels[3];
+	cl_kernel const k_normalise_pivot = prg.kernels[4];
+	cl_kernel const k_reduce          = prg.kernels[5];
+	cl_kernel const k_rearrange       = prg.kernels[6];
+	
 #if PRINT_PROCESS_INFO
 	cl_ulong *const disp_indices = malloc(2*n * sizeof(cl_ulong));
 	double *const disp_matrix = malloc(2*n*n * sizeof(double));
@@ -117,15 +119,6 @@ static void invert_matrix(
 	}
 #endif
 
-	// Set kernel constants for enhanced code readability
-	cl_kernel const k_build_identity  = prg.kernels[KERNEL_BUILD_IDENTITY];
-	cl_kernel const k_max_reduc_begin = prg.kernels[KERNEL_MAX_REDUC_BEGIN];
-	cl_kernel const k_max_reduc       = prg.kernels[KERNEL_MAX_REDUC];
-	cl_kernel const k_store_column    = prg.kernels[KERNEL_STORE_COLUMN];
-	cl_kernel const k_normalise_pivot = prg.kernels[KERNEL_NORMALISE_PIVOT];
-	cl_kernel const k_reduce          = prg.kernels[KERNEL_REDUCE];
-	cl_kernel const k_rearrange       = prg.kernels[KERNEL_REARRANGE];
-	
 	// Begin time counting if needed
 	int64_t tp_start;
 	if (out_duration) {
@@ -160,6 +153,18 @@ static void invert_matrix(
 	size_t const normalise_dim_2d[2] = {2, linear_size};
 	size_t const reduce_dim_3d[3] = {2, n - 1, linear_size};
 	size_t const rearrange_dim_2d[2] = {n, linear_size};
+
+	// Count and allocate events 
+	// Rather, since the queue is IN_ORDER, few events might do.
+	cl_event events[3];
+	cl_event *const lcka = events;
+	cl_event *const lckb = events + 1;
+	cl_event *const lckc = events + 2;
+/*
+	size_t const event_count = 
+		3 + n * (5 + (size_t)(log(n) / log(REDUCTION_WIDTH));
+	cl_event *const events = malloc(event_count * sizeof(cl_event));
+*/
 
 	// Need to turn size_t to unsigned long for ensured kernel compatibility.
 	cl_ulong const kp_n = n;
@@ -198,19 +203,19 @@ static void invert_matrix(
 
 	double const zero = 0.;
 	status = clEnqueueWriteBuffer(
-		plate.queue, matrix, CL_FALSE, 0, size, in, 0, NULL, NULL
+		plate.queue, matrix, CL_FALSE, 0, size, in, 0, NULL, lcka
 	);
 	check_status(status, "Could not enqueue initial buffer copy.");
 	status = clEnqueueFillBuffer(
 		plate.queue, matrix, &zero, sizeof(zero),
-		size, size, 0, NULL, NULL
+		size, size, 0, NULL, lckb
 	);
 	check_status(status, "Could not enqueue identity buffer initialisation.");
 
 	status = clEnqueueNDRangeKernel(
 		plate.queue, k_build_identity,
 		1, NULL, &linear_size, NULL,
-		0, NULL, NULL
+		1, lckb, lckc
 	);
 	check_status(status, "Could not enqueue <build_identity> kernel execution.");
 
@@ -231,19 +236,26 @@ static void invert_matrix(
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_max_reduc_begin,
 			1, NULL, &linear_size, NULL,
-			0, NULL, NULL
+			1, lckc, lcka
 		);
 		check_status(status, "Could not enqueue <max_reduc_begin> kernel execution.");
 
+		PRINT_STEP(k, "Base Reduction")
 		cl_ulong depth = 0;
 		size_t count = n;
+		cl_event *lck_out;
 		do {
+			cl_event *const lck_in = lcka + depth % 2;
+			lck_out = lcka + (1 + depth) % 2;
+			
 			count = (count + REDUCTION_WIDTH - 1) / REDUCTION_WIDTH;
 			status = clSetKernelArg(k_max_reduc, 1, sizeof(cl_ulong), &depth);
 			check_status(status, "Could not define kernel argument.");
 
 			status = clEnqueueNDRangeKernel(
-				plate.queue, k_max_reduc, 1, NULL, &count, NULL, 0, NULL, NULL
+				plate.queue, k_max_reduc,
+				1, NULL, &count, NULL,
+				1, lck_in, lck_out
 			);
 			check_status(status, "Could not enqueue <max_reduc> kernel execution.");
 			
@@ -255,7 +267,7 @@ static void invert_matrix(
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_store_column,
 			1, NULL, &linear_size, NULL,
-			0, NULL, NULL
+			1, lck_out, lckc
 		);
 		check_status(status, "Could not enqueue <store_column> kernel execution.");
 
@@ -264,7 +276,7 @@ static void invert_matrix(
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_normalise_pivot,
 			2, NULL, normalise_dim_2d, NULL,
-			0, NULL, NULL
+			1, lckc, lcka
 		);
 		check_status(status, "Could not enqueue <normalise_pivot> kernel execution.");
 
@@ -273,7 +285,7 @@ static void invert_matrix(
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_reduce,
 			3, NULL, reduce_dim_3d, NULL,
-			0, NULL, NULL
+			1, lcka, lckc
 		);
 		check_status(status, "Could not enqueue <reduce> kernel execution.");
 	}
@@ -281,7 +293,7 @@ static void invert_matrix(
 	PRINT_STEP(n, "Final");
 
 	status = clEnqueueNDRangeKernel(
-		plate.queue, k_rearrange, 2, NULL, rearrange_dim_2d, NULL, 0, NULL, NULL
+		plate.queue, k_rearrange, 2, NULL, rearrange_dim_2d, NULL, 1, lckc, lcka
 	);
 	check_status(status, "Could not enqueue kernel execution.");
 
@@ -289,7 +301,7 @@ static void invert_matrix(
 
 	// Fetch the resulting matrix back to host memory (in output buffer).
 	status = clEnqueueReadBuffer(
-		plate.queue, matrix, CL_TRUE, 0, size, out, 0, NULL, NULL
+		plate.queue, matrix, CL_TRUE, 0, size, out, 1, lcka, NULL
 	);
 	check_status(status, "Could not fetch matrix back.");
 
@@ -352,7 +364,7 @@ int main(int argc, char const *const *const argv) {
 				error -= m[i * n + j] * r[j * n + c];
 			}
 		}
-	}	
+	}
 	free(matrices);
 	error = fabs(error);
 
