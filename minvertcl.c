@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <time.h> // For time measurement
 #include <math.h> // For error measurement
-                  // Ah, also useful for iteration counting
 
 // Project includes
 #include "clcooker.h"
@@ -52,7 +51,6 @@ static void print_matrix(double const *const buf, size_t const height, size_t co
 	} \
 	print_indices(disp_indices, 2*n); \
 	print_line((double const*)disp_indices, 2*n); \
-	puts("\nMatrix:"); \
 	status = clEnqueueReadBuffer( \
 		plate.queue, matrix, CL_TRUE, 0, 2*n*n*sizeof(double), disp_matrix, 0, NULL, NULL \
 	); \
@@ -60,7 +58,10 @@ static void print_matrix(double const *const buf, size_t const height, size_t co
 		printf("Could not fetch matrix back. (%d)", status); \
 		exit(EXIT_FAILURE); \
 	} \
-	print_matrix(disp_matrix, n, 2*n); \
+	puts("\nMatrix (left):"); \
+	print_matrix(disp_matrix, n, n); \
+	puts("Matrix (extension):"); \
+	print_matrix(disp_matrix + n * n, n, n); \
 	fflush(stdout); \
 }
 #else
@@ -139,8 +140,6 @@ static void invert_matrix(
 	cl_int status; // For error management
 	cl_mem matrix; // Initially m on the left and initialised I n x n on the right
 	cl_mem indices; // Used for maximum reduction, reduction and rearrangement
-	size_t const extended_line_length = 2 * n;
-	size_t const extended_line_size = extended_line_length * sizeof(double);
 	size_t const line_size = n * sizeof(double);
 	size_t const size = n * line_size;
 
@@ -150,18 +149,17 @@ static void invert_matrix(
 	matrix = clCreateBuffer(plate.context, mem_flags, 2 * size, NULL, &status);
 	check_status(status, "Could not create OpenCL buffer.");
 
+	// Multipurpose buffer
 	indices = clCreateBuffer(
-		plate.context, mem_flags, 2 * n * sizeof(cl_ulong), NULL, &status
+		plate.context, mem_flags, 2 * line_size, NULL, &status
 	);
 	check_status(status, "Could not create OpenCL buffer.");
 
 	// Define procedures to run on the GPU
-	size_t const linear_single_size = (n + REDUCTION_WIDTH - 1) / REDUCTION_WIDTH;
-	size_t const linear_double_size = 
-		(extended_line_length + REDUCTION_WIDTH - 1) / REDUCTION_WIDTH;
-	size_t global_2d_sizes[2];
-	global_2d_sizes[0] = n;
-	global_2d_sizes[1] = linear_double_size;
+	size_t const linear_size = (n + REDUCTION_WIDTH - 1) / REDUCTION_WIDTH;
+	size_t const normalise_dim_2d[2] = {2, linear_size};
+	size_t const reduce_dim_3d[3] = {2, n - 1, linear_size};
+	size_t const rearrange_dim_2d[2] = {n, linear_size};
 
 	// Need to turn size_t to unsigned long for ensured kernel compatibility.
 	cl_ulong const kp_n = n;
@@ -199,22 +197,19 @@ static void invert_matrix(
 	check_status(status, "Could not define kernel arguments.");
 
 	double const zero = 0.;
-	for (size_t i = 0; i < n; ++i) {
-		status = clEnqueueWriteBuffer(
-			plate.queue, matrix, CL_FALSE,
-			i * extended_line_size, line_size, &in[i*n], 0, NULL, NULL
-		);
-		check_status(status, "Could not enqueue initial buffer copy.");
-		status = clEnqueueFillBuffer(
-			plate.queue, matrix, &zero, sizeof(zero),
-			i * extended_line_size + line_size, line_size, 0, NULL, NULL
-		);
-		check_status(status, "Could not enqueue identity buffer initialisation.");
-	}
+	status = clEnqueueWriteBuffer(
+		plate.queue, matrix, CL_FALSE, 0, size, in, 0, NULL, NULL
+	);
+	check_status(status, "Could not enqueue initial buffer copy.");
+	status = clEnqueueFillBuffer(
+		plate.queue, matrix, &zero, sizeof(zero),
+		size, size, 0, NULL, NULL
+	);
+	check_status(status, "Could not enqueue identity buffer initialisation.");
 
 	status = clEnqueueNDRangeKernel(
 		plate.queue, k_build_identity,
-		1, NULL, &linear_single_size, NULL,
+		1, NULL, &linear_size, NULL,
 		0, NULL, NULL
 	);
 	check_status(status, "Could not enqueue <build_identity> kernel execution.");
@@ -235,7 +230,7 @@ static void invert_matrix(
 		// Find maximum of line 
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_max_reduc_begin,
-			1, NULL, &linear_single_size, NULL,
+			1, NULL, &linear_size, NULL,
 			0, NULL, NULL
 		);
 		check_status(status, "Could not enqueue <max_reduc_begin> kernel execution.");
@@ -247,7 +242,6 @@ static void invert_matrix(
 			status = clSetKernelArg(k_max_reduc, 1, sizeof(cl_ulong), &depth);
 			check_status(status, "Could not define kernel argument.");
 
-			++depth;
 			status = clEnqueueNDRangeKernel(
 				plate.queue, k_max_reduc, 1, NULL, &count, NULL, 0, NULL, NULL
 			);
@@ -260,7 +254,7 @@ static void invert_matrix(
 
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_store_column,
-			1, NULL, &linear_single_size, NULL,
+			1, NULL, &linear_size, NULL,
 			0, NULL, NULL
 		);
 		check_status(status, "Could not enqueue <store_column> kernel execution.");
@@ -269,7 +263,7 @@ static void invert_matrix(
 
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_normalise_pivot,
-			1, NULL, &linear_double_size, NULL,
+			2, NULL, normalise_dim_2d, NULL,
 			0, NULL, NULL
 		);
 		check_status(status, "Could not enqueue <normalise_pivot> kernel execution.");
@@ -278,7 +272,7 @@ static void invert_matrix(
 
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_reduce,
-			2, NULL, global_2d_sizes, NULL,
+			3, NULL, reduce_dim_3d, NULL,
 			0, NULL, NULL
 		);
 		check_status(status, "Could not enqueue <reduce> kernel execution.");
@@ -286,23 +280,18 @@ static void invert_matrix(
 
 	PRINT_STEP(n, "Final");
 
-	global_2d_sizes[0] = n;
-	global_2d_sizes[1] = linear_single_size;
 	status = clEnqueueNDRangeKernel(
-		plate.queue, k_rearrange, 2, NULL, global_2d_sizes, NULL, 0, NULL, NULL
+		plate.queue, k_rearrange, 2, NULL, rearrange_dim_2d, NULL, 0, NULL, NULL
 	);
 	check_status(status, "Could not enqueue kernel execution.");
 
 	PRINT_STEP(n, "Rearrange");
 
 	// Fetch the resulting matrix back to host memory (in output buffer).
-	for (size_t i = 0; i < n; ++i) {
-		status = clEnqueueReadBuffer(
-			plate.queue, matrix, CL_TRUE,
-			i * extended_line_size, line_size, &out[i*n], 0, NULL, NULL
-		);
-		check_status(status, "Could not fetch matrix back.");
-	}
+	status = clEnqueueReadBuffer(
+		plate.queue, matrix, CL_TRUE, 0, size, out, 0, NULL, NULL
+	);
+	check_status(status, "Could not fetch matrix back.");
 
 	clReleaseMemObject(matrix);
 	clReleaseMemObject(indices);
