@@ -38,19 +38,13 @@ static void print_matrix(double const *const buf, size_t const height, size_t co
 	status = clEnqueueReadBuffer( \
 		plate.queue, indices, CL_TRUE, 0, 2*n*sizeof(cl_ulong), disp_indices, 0, NULL, NULL \
 	); \
-	if (status != CL_SUCCESS) { \
-		printf("Could not fetch matrix back. (%d)", status); \
-		exit(EXIT_FAILURE); \
-	} \
+	check_status(status, "Could not fetch indices back."); \
 	print_indices(disp_indices, 2*n); \
 	print_line((double const*)disp_indices, 2*n); \
 	status = clEnqueueReadBuffer( \
 		plate.queue, matrix, CL_TRUE, 0, 2*n*n*sizeof(double), disp_matrix, 0, NULL, NULL \
 	); \
-	if (status != CL_SUCCESS) { \
-		printf("Could not fetch matrix back. (%d)", status); \
-		exit(EXIT_FAILURE); \
-	} \
+	check_status(status, "Could not fetch matrix back."); \
 	puts("\nMatrix (left):"); \
 	print_matrix(disp_matrix, n, n); \
 	puts("Matrix (extension):"); \
@@ -156,15 +150,19 @@ static void invert_matrix(
 
 	// Count and allocate events 
 	// Rather, since the queue is IN_ORDER, few events might do.
+#if 0
 	cl_event events[3];
 	cl_event *const lcka = events;
 	cl_event *const lckb = events + 1;
 	cl_event *const lckc = events + 2;
-/*
+#endif
 	size_t const event_count = 
-		3 + n * (5 + (size_t)(log(n) / log(REDUCTION_WIDTH));
+		5 + n * (5 + (size_t)(log2(n) / log2(REDUCTION_WIDTH)));
 	cl_event *const events = malloc(event_count * sizeof(cl_event));
-*/
+	if (!events) {
+		puts("Could not mallocate event buffer.");
+		exit(EXIT_FAILURE);
+	}
 
 	// Need to turn size_t to unsigned long for ensured kernel compatibility.
 	cl_ulong const kp_n = n;
@@ -203,21 +201,27 @@ static void invert_matrix(
 
 	double const zero = 0.;
 	status = clEnqueueWriteBuffer(
-		plate.queue, matrix, CL_FALSE, 0, size, in, 0, NULL, lcka
+		plate.queue, matrix, CL_FALSE, 0, size, in, 0, NULL, &events[1]
 	);
 	check_status(status, "Could not enqueue initial buffer copy.");
 	status = clEnqueueFillBuffer(
 		plate.queue, matrix, &zero, sizeof(zero),
-		size, size, 0, NULL, lckb
+		size, size, 0, NULL, &events[0]
 	);
 	check_status(status, "Could not enqueue identity buffer initialisation.");
 
 	status = clEnqueueNDRangeKernel(
 		plate.queue, k_build_identity,
 		1, NULL, &linear_size, NULL,
-		1, lckb, lckc
+		1, &events[0], &events[2]
 	);
 	check_status(status, "Could not enqueue <build_identity> kernel execution.");
+
+	size_t event = 3;
+	check_status(
+		clEnqueueBarrierWithWaitList(plate.queue, 2, &events[1], &events[event]),
+		"Could not wait for buffer initialisation."
+	);
 
 	// Iterate through all lines for our custom Gauss-Jordan reduction
 	for (cl_ulong k = 0; k < kp_n; ++k) {
@@ -236,18 +240,15 @@ static void invert_matrix(
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_max_reduc_begin,
 			1, NULL, &linear_size, NULL,
-			1, lckc, lcka
+			1, &events[event], &events[event + 1]
 		);
 		check_status(status, "Could not enqueue <max_reduc_begin> kernel execution.");
+		++event;
 
 		PRINT_STEP(k, "Base Reduction")
 		cl_ulong depth = 0;
 		size_t count = n;
-		cl_event *lck_out;
 		do {
-			cl_event *const lck_in = lcka + depth % 2;
-			lck_out = lcka + (1 + depth) % 2;
-			
 			count = (count + REDUCTION_WIDTH - 1) / REDUCTION_WIDTH;
 			status = clSetKernelArg(k_max_reduc, 1, sizeof(cl_ulong), &depth);
 			check_status(status, "Could not define kernel argument.");
@@ -255,9 +256,10 @@ static void invert_matrix(
 			status = clEnqueueNDRangeKernel(
 				plate.queue, k_max_reduc,
 				1, NULL, &count, NULL,
-				1, lck_in, lck_out
+				1, &events[event], &events[event + 1]
 			);
 			check_status(status, "Could not enqueue <max_reduc> kernel execution.");
+			++event;
 			
 			PRINT_STEP(k, "Reduction")
 
@@ -267,44 +269,51 @@ static void invert_matrix(
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_store_column,
 			1, NULL, &linear_size, NULL,
-			1, lck_out, lckc
+			1, &events[event], &events[event + 1]
 		);
 		check_status(status, "Could not enqueue <store_column> kernel execution.");
+		++event;
 
 		PRINT_STEP(k, "Store column")
 
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_normalise_pivot,
 			2, NULL, normalise_dim_2d, NULL,
-			1, lckc, lcka
+			1, &events[event], &events[event + 1]
 		);
 		check_status(status, "Could not enqueue <normalise_pivot> kernel execution.");
+		++event;
 
 		PRINT_STEP(k, "Normalise")
 
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_reduce,
 			3, NULL, reduce_dim_3d, NULL,
-			1, lcka, lckc
+			1, &events[event], &events[event + 1]
 		);
 		check_status(status, "Could not enqueue <reduce> kernel execution.");
+		++event;
 	}
 
 	PRINT_STEP(n, "Final");
 
 	status = clEnqueueNDRangeKernel(
-		plate.queue, k_rearrange, 2, NULL, rearrange_dim_2d, NULL, 1, lckc, lcka
+		plate.queue, k_rearrange,
+		2, NULL, rearrange_dim_2d, NULL,
+		1, &events[event], &events[event + 1]
 	);
 	check_status(status, "Could not enqueue kernel execution.");
+	++event;
 
 	PRINT_STEP(n, "Rearrange");
 
 	// Fetch the resulting matrix back to host memory (in output buffer).
 	status = clEnqueueReadBuffer(
-		plate.queue, matrix, CL_TRUE, 0, size, out, 1, lcka, NULL
+		plate.queue, matrix, CL_TRUE, 0, size, out, 1, &events[event], NULL
 	);
 	check_status(status, "Could not fetch matrix back.");
 
+	free(events);
 	clReleaseMemObject(matrix);
 	clReleaseMemObject(indices);
 
