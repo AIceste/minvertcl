@@ -39,8 +39,8 @@ static void print_matrix(double const *const buf, size_t const height, size_t co
 		plate.queue, indices, CL_TRUE, 0, 2*n*sizeof(cl_ulong), disp_indices, 0, NULL, NULL \
 	); \
 	check_status(status, "Could not fetch indices back."); \
-	print_indices(disp_indices, 2*n); \
-	print_line((double const*)disp_indices, 2*n); \
+	print_indices(disp_indices, step + n / REDUCTION_WIDTH + 1); \
+	print_line((double const*)disp_indices + n, n); \
 	status = clEnqueueReadBuffer( \
 		plate.queue, matrix, CL_TRUE, 0, 2*n*n*sizeof(double), disp_matrix, 0, NULL, NULL \
 	); \
@@ -54,6 +54,8 @@ static void print_matrix(double const *const buf, size_t const height, size_t co
 #else
 #define PRINT_STEP(step, msg)
 #endif
+#define HARD_SYNCH clEnqueueReadBuffer( \
+	plate.queue, matrix, CL_TRUE, 0, sizeof(cl_double), out, 0, NULL, NULL);
 
 static void check_status(cl_int const status, char const *const msg) {
 	if (status != CL_SUCCESS) {
@@ -149,13 +151,7 @@ static void invert_matrix(
 	size_t const rearrange_dim_2d[2] = {n, linear_size};
 
 	// Count and allocate events 
-	// Rather, since the queue is IN_ORDER, few events might do.
-#if 0
-	cl_event events[3];
-	cl_event *const lcka = events;
-	cl_event *const lckb = events + 1;
-	cl_event *const lckc = events + 2;
-#endif
+	// Could do with 3 events and cycles, but go the hard way.
 	size_t const event_count = 
 		5 + n * (5 + (size_t)(log2(n) / log2(REDUCTION_WIDTH)));
 	cl_event *const events = malloc(event_count * sizeof(cl_event));
@@ -262,6 +258,13 @@ static void invert_matrix(
 			++event;
 			
 			PRINT_STEP(k, "Reduction")
+			// This also does not work, obviously, since it's an issue with events.
+			// check_status(
+			// 	clEnqueueMarkerWithWaitList(plate.queue, 0, NULL, NULL),
+			// 	"Could not synchronise during reduction."
+			// );
+			HARD_SYNCH // Slow things down but the event does not seem to work...
+			// Removing this double the speed but breaks the result
 
 			++depth;
 		} while (count > 1);
@@ -378,7 +381,7 @@ int main(int argc, char const *const *const argv) {
 	error = fabs(error);
 
 	printf(
-		"Matrix size: %lu\nInversion duration: %f\nError: %f\n",
+		"Matrix size: %lu\nInversion duration: %f\nError: %.9f\n",
 		n, duration, error
 	);
 
