@@ -117,7 +117,7 @@ __kernel void normalise_pivot(
 __kernel void reduce(
 	cl_ulong const k,
 	__global double *m, __global cl_ulong const *const indices,
-	cl_ulong const n
+	__global const double const *p, cl_ulong const n
 ) {
 	m += get_global_id(0) * n * n;
 	cl_ulong i = get_global_id(1);
@@ -125,7 +125,7 @@ __kernel void reduce(
 	i += (i >= k);
 	cl_ulong const end = min(n, j + REDUCTION_WIDTH);
 	__global double *const row = m + i * n;
-	__global double const *const pivot = m + k * n;
+	__global double const *const pivot = p + get_global_id(0) * n;
 
 	double const mul = ((__global double*)indices)[n + i];
 	do {

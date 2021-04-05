@@ -129,20 +129,27 @@ static void invert_matrix(
 	cl_int status; // For error management
 	cl_mem matrix; // Initially m on the left and initialised I n x n on the right
 	cl_mem indices; // Used for maximum reduction, reduction and rearrangement
+	cl_mem pivot; // Temporary buffer to optimise cache
 	size_t const line_size = n * sizeof(double);
 	size_t const size = n * line_size;
 
 	// Create buffer objects for input & output matrix and reordering data.
-	cl_mem_flags mem_flags = CL_MEM_READ_WRITE /*| CL_MEM_HOST_NO_ACCESS*/;
+	cl_mem_flags mem_flags = CL_MEM_READ_WRITE;
 
 	matrix = clCreateBuffer(plate.context, mem_flags, 2 * size, NULL, &status);
-	check_status(status, "Could not create OpenCL buffer.");
+	check_status(status, "Could not create OpenCL matrix buffer.");
 
 	// Multipurpose buffer
 	indices = clCreateBuffer(
 		plate.context, mem_flags, 2 * line_size, NULL, &status
 	);
-	check_status(status, "Could not create OpenCL buffer.");
+	check_status(status, "Could not create OpenCL indices buffer.");
+
+	pivot = clCreateBuffer(
+		plate.context, CL_MEM_READ_ONLY | CL_MEM_HOST_NO_ACCESS,
+		2 * line_size, NULL, &status
+	);
+	check_status(status, "Could not create OpenCL pivot buffer.");
 
 	// Define procedures to run on the GPU
 	size_t const linear_size = (n + REDUCTION_WIDTH - 1) / REDUCTION_WIDTH;
@@ -187,7 +194,8 @@ static void invert_matrix(
 
 		| clSetKernelArg(k_reduce, 1, sizeof(cl_mem), &matrix)
 		| clSetKernelArg(k_reduce, 2, sizeof(cl_mem), &indices)
-		| clSetKernelArg(k_reduce, 3, sizeof(cl_ulong), &kp_n)
+		| clSetKernelArg(k_reduce, 3, sizeof(cl_mem), &pivot)
+		| clSetKernelArg(k_reduce, 4, sizeof(cl_ulong), &kp_n)
 
 		| clSetKernelArg(k_rearrange, 0, sizeof(cl_mem), &matrix)
 		| clSetKernelArg(k_rearrange, 1, sizeof(cl_mem), &indices)
@@ -283,6 +291,16 @@ static void invert_matrix(
 		++event;
 
 		PRINT_STEP(k, "Normalise")
+		status = clEnqueueCopyBuffer(
+			plate.queue, matrix, pivot, k * line_size, 0, line_size,
+			1, lck1, lck2
+		);
+		check_status(status, "Could not enqueue <copy> for left part of pivot.");
+		status = clEnqueueCopyBuffer(
+			plate.queue, matrix, pivot, size + k * line_size, line_size, line_size,
+			1, lck2, lck1
+		);
+		check_status(status, "Could not enqueue <copy> for right part of pivot.");
 
 		status = clEnqueueNDRangeKernel(
 			plate.queue, k_reduce,
@@ -292,8 +310,8 @@ static void invert_matrix(
 		check_status(status, "Could not enqueue <reduce> kernel execution.");
 		++event;
 
-        HARD_SYNCH // Slow things down but the event does not seem to work...
-        // Removing this enhance the speed a great deal but breaks the result
+		HARD_SYNCH // Slow things down but the event does not seem to work...
+		// Removing this enhance the speed a great deal but breaks the result
 	}
 
 	PRINT_STEP(n, "Final");
