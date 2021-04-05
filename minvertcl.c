@@ -260,13 +260,6 @@ static void invert_matrix(
 			++event;
 			
 			PRINT_STEP(k, "Reduction")
-			// This also does not work, obviously, since it's an issue with events.
-			// check_status(
-			// 	clEnqueueMarkerWithWaitList(plate.queue, 0, NULL, NULL),
-			// 	"Could not synchronise during reduction."
-			// );
-			HARD_SYNCH // Slow things down but the event does not seem to work...
-			// Removing this double the speed but breaks the result
 
 			++depth;
 		} while (count > 1);
@@ -298,6 +291,9 @@ static void invert_matrix(
 		);
 		check_status(status, "Could not enqueue <reduce> kernel execution.");
 		++event;
+
+        HARD_SYNCH // Slow things down but the event does not seem to work...
+        // Removing this enhance the speed a great deal but breaks the result
 	}
 
 	PRINT_STEP(n, "Final");
