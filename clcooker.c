@@ -197,8 +197,10 @@ enum cooker_state cooker_dish_init(
 		goto failure_createprogram;
 	
 	// Build (compile & link) the program for the device.
+	char const *const build_options = 
+		"-cl-mad-enable -cl-no-signed-zeros";
 	if (clBuildProgram(
-			program, 1, &plate->device, NULL, NULL, NULL
+			program, 1, &plate->device, build_options, NULL, NULL
 		) != CL_SUCCESS
 	)
 		goto failure_build;

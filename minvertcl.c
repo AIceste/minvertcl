@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <time.h> // For time measurement
 #include <math.h> // For error measurement
-                  // And event counting
 
 // Project includes
 #include "clcooker.h"
