@@ -220,7 +220,6 @@ static void invert_matrix(
 	);
 	check_status(status, "Could not enqueue <build_identity> kernel execution.");
 
-	size_t event = 3;
 	check_status(
 		clEnqueueBarrierWithWaitList(plate.queue, 2, lck1, lck0),
 		"Could not wait for buffer initialisation."
@@ -246,7 +245,6 @@ static void invert_matrix(
 			1, lck0, lck1
 		);
 		check_status(status, "Could not enqueue <max_reduc_begin> kernel execution.");
-		++event;
 
 		PRINT_STEP(k, "Base Reduction")
 		cl_ulong depth = 0;
@@ -264,7 +262,6 @@ static void invert_matrix(
 				1, wait_for, throw
 			);
 			check_status(status, "Could not enqueue <max_reduc> kernel execution.");
-			++event;
 			
 			PRINT_STEP(k, "Reduction")
 
@@ -277,7 +274,6 @@ static void invert_matrix(
 			1, lck_reduc_lst, lck0
 		);
 		check_status(status, "Could not enqueue <store_column> kernel execution.");
-		++event;
 
 		PRINT_STEP(k, "Store column")
 
@@ -287,7 +283,6 @@ static void invert_matrix(
 			1, lck0, lck1
 		);
 		check_status(status, "Could not enqueue <normalise_pivot> kernel execution.");
-		++event;
 
 		PRINT_STEP(k, "Normalise")
 		status = clEnqueueCopyBuffer(
@@ -307,7 +302,6 @@ static void invert_matrix(
 			1, lck1, lck0
 		);
 		check_status(status, "Could not enqueue <reduce> kernel execution.");
-		++event;
 
 		HARD_SYNCH // Slow things down but the event does not seem to work...
 		// Removing this enhance the speed a great deal but breaks the result
@@ -321,7 +315,6 @@ static void invert_matrix(
 		1, lck0, lck1
 	);
 	check_status(status, "Could not enqueue kernel execution.");
-	++event;
 
 	PRINT_STEP(n, "Rearrange");
 
